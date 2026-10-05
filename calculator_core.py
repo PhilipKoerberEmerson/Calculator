@@ -5,12 +5,13 @@ from __future__ import annotations
 import ast
 import math
 import operator
+from fractions import Fraction
 from typing import Callable
 
 
 MAX_EXPRESSION_LENGTH = 120
 
-_BINARY_OPERATORS: dict[type[ast.operator], Callable[[float, float], float]] = {
+_BINARY_OPERATORS: dict[type[ast.operator], Callable[[float | Fraction, float | Fraction], float | Fraction]] = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
@@ -18,7 +19,7 @@ _BINARY_OPERATORS: dict[type[ast.operator], Callable[[float, float], float]] = {
     ast.Pow: operator.pow,
     ast.Mod: operator.mod,
 }
-_UNARY_OPERATORS: dict[type[ast.unaryop], Callable[[float], float]] = {
+_UNARY_OPERATORS: dict[type[ast.unaryop], Callable[[float | Fraction], float | Fraction]] = {
     ast.UAdd: operator.pos,
     ast.USub: operator.neg,
 }
@@ -30,21 +31,28 @@ def evaluate_expression(expression: str) -> float:
         raise ValueError("invalid expression")
 
     tree = ast.parse(expression, mode="eval")
-    return _evaluate_node(tree.body)
+    return float(_evaluate_node(tree.body))
 
 
-def _evaluate_node(node: ast.AST) -> float:
+def evaluate_fraction_expression(expression: str) -> Fraction:
+    if not expression or len(expression) > MAX_EXPRESSION_LENGTH:
+        raise ValueError("invalid expression")
+    tree = ast.parse(expression, mode="eval")
+    return Fraction(_evaluate_node(tree.body, exact=True))
+
+
+def _evaluate_node(node: ast.AST, exact: bool = False) -> float | Fraction:
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return float(node.value)
+        return Fraction(str(node.value)) if exact else float(node.value)
     if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
-        left = _evaluate_node(node.left)
-        right = _evaluate_node(node.right)
+        left = _evaluate_node(node.left, exact)
+        right = _evaluate_node(node.right, exact)
         result = _BINARY_OPERATORS[type(node.op)](left, right)
         if abs(result) == float("inf"):
             raise ValueError("result out of range")
         return result
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPERATORS:
-        return _UNARY_OPERATORS[type(node.op)](_evaluate_node(node.operand))
+        return _UNARY_OPERATORS[type(node.op)](_evaluate_node(node.operand, exact))
     raise ValueError("unsupported expression")
 
 
@@ -61,6 +69,29 @@ def format_display(value: float) -> str:
         if len(text) <= 13:
             return text
     raise ValueError("value does not fit the display")
+
+
+def fraction_from_parts(parts: list[str]) -> Fraction:
+    if len(parts) == 2:
+        return Fraction(int(parts[0]), int(parts[1]))
+    if len(parts) == 3:
+        whole, numerator, denominator = map(int, parts)
+        if numerator < 0 or denominator <= 0:
+            raise ValueError("invalid mixed fraction")
+        value = Fraction(abs(whole)) + Fraction(numerator, denominator)
+        return -value if parts[0].startswith("-") else value
+    raise ValueError("invalid fraction")
+
+
+def format_fraction(value: Fraction, improper: bool = False) -> str:
+    if value.denominator == 1:
+        return str(value.numerator)
+    whole, remainder = divmod(abs(value.numerator), value.denominator)
+    if whole and not improper:
+        sign = "-" if value < 0 else ""
+        separator = " - " if value < 0 else " + "
+        return f"{sign}{whole}{separator}{remainder}/{value.denominator}"
+    return f"{value.numerator}/{value.denominator}"
 
 
 def apply_function(name: str, value: float, angle_mode: str = "DEG") -> float:

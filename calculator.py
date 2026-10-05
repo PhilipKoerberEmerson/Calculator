@@ -7,12 +7,13 @@ import math
 import random
 import re
 from pathlib import Path
+from fractions import Fraction
 
 from PyQt6.QtCore import QEvent, QTimer, Qt
 from PyQt6.QtGui import QFont, QFontDatabase, QPixmap
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
 
-from calculator_core import apply_function, evaluate_expression, format_display, format_result
+from calculator_core import apply_function, evaluate_expression, evaluate_fraction_expression, format_display, format_fraction, format_result, fraction_from_parts
 
 
 ERROR_TEXT = "Error"
@@ -32,6 +33,10 @@ class CalculatorWindow(QMainWindow):
         self.expression = ""
         self.display_prefix = ""
         self.root_degree_start = None
+        self.fraction_parts = None
+        self.fraction_prefix = ""
+        self.fraction_mode = "decimal"
+        self.fraction_value = None
         self.answer = 0.0
         self.memory = 0.0
         self.angle_mode = "DEG"
@@ -289,6 +294,36 @@ class CalculatorWindow(QMainWindow):
 
     def _handle_press(self, key: str) -> None:
         self.engineering_notation = False
+        if self.fraction_parts is not None and key not in {"SHIFT", "MODE"}:
+            if key.isdigit():
+                self.fraction_parts[-1] += key
+                self.shift = False
+                self._refresh_status()
+                self._refresh_display()
+                return
+            if key == "DEL":
+                if self.fraction_parts[-1]:
+                    self.fraction_parts[-1] = self.fraction_parts[-1][:-1]
+                elif len(self.fraction_parts) > 2:
+                    self.fraction_parts.pop()
+                else:
+                    self.fraction_parts = None
+                self._refresh_display()
+                return
+            if key == ".":
+                self._set_button_feedback(key, "invalid")
+                self.shift = False
+                self._refresh_status()
+                return
+            if key == "AB/C" and not self.shift and len(self.fraction_parts) == 2:
+                if self.fraction_parts[-1]:
+                    self.fraction_parts.append("")
+                else:
+                    self._set_button_feedback(key, "invalid")
+                self._refresh_display()
+                return
+            if key not in {"ON", "AC", "C"} and not self._finish_fraction():
+                return
         if self.root_degree_start is not None and key in {
             "=", "X^Y", "X", "*", "/", "%", "+", "-", "sin", "cos", "tan",
             "WURZEL", "log", "ln", "1/X", "X^2", "Min", "MR", "M+", "ENG",
@@ -299,17 +334,23 @@ class CalculatorWindow(QMainWindow):
             self.shift = not self.shift
             self._refresh_status()
             return
-        if key in {"Kin", "Kout", "ENG<-", "AB/C", "O'\"", "hyp"}:
+        if key in {"Kin", "Kout", "ENG<-", "O'\"", "hyp"}:
             self._show_message(f"{key}: Diese Funktion geht noch nicht")
             self.shift = False
             self._refresh_status()
             return
         elif key == "MODE":
             self.angle_mode = "RAD" if self.angle_mode == "DEG" else "DEG"
+        elif key == "AB/C":
+            self._fraction_action()
+            return
         elif key in {"ON", "AC", "C"}:
             self.expression = ""
             self.display_prefix = ""
             self.root_degree_start = None
+            self.fraction_parts = None
+            self.fraction_mode = "decimal"
+            self.fraction_value = None
             self.shift = False
             self.just_calculated = False
             if key == "ON":
@@ -333,6 +374,7 @@ class CalculatorWindow(QMainWindow):
             self._memory_action(key)
             return
         elif key == "Ans":
+            self.fraction_mode = "decimal"
             self.expression += repr(self.answer)
         elif key == "X^Y" and self.shift:
             self.display_prefix = self.expression
@@ -340,6 +382,7 @@ class CalculatorWindow(QMainWindow):
             self.root_degree_start = len(self.expression)
             self.just_calculated = False
         elif key == "." and self.shift:
+            self.fraction_mode = "decimal"
             number = f"0.{random.randrange(1000):03d}"
             pending_input = self.expression[len(self.display_prefix):] if self.display_prefix else ""
             operator = "**" if pending_input.startswith("**") else pending_input[:1]
@@ -354,6 +397,7 @@ class CalculatorWindow(QMainWindow):
                 self.display_prefix = ""
             self.just_calculated = False
         elif key == "EXP":
+            self.fraction_mode = "decimal"
             if self.shift:
                 if self.just_calculated and self.root_degree_start is None:
                     self.expression = ""
@@ -374,6 +418,8 @@ class CalculatorWindow(QMainWindow):
             if self.just_calculated and key not in {"+", "-", "*", "X", "/", "%", ")", "X^Y"}:
                 self.expression = ""
                 self.display_prefix = ""
+                self.fraction_mode = "decimal"
+                self.fraction_value = None
             if key in {"+", "-", "*", "X", "/", "%", "X^Y"}:
                 self.display_prefix = self.expression
             self.expression += "*" if key == "X" else ("**" if key == "X^Y" else key)
@@ -386,12 +432,64 @@ class CalculatorWindow(QMainWindow):
         calculation = self.expression
         try:
             self.answer = evaluate_expression(self.expression)
-            self.expression = repr(self.answer)
+            if self.fraction_mode != "decimal":
+                self.fraction_value = evaluate_fraction_expression(self.expression)
+                self.expression = f"({self.fraction_value.numerator}/{self.fraction_value.denominator})"
+            else:
+                self.expression = repr(self.answer)
             self._remember_result(calculation)
         except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError):
             self.expression = ERROR_TEXT
+            self.fraction_mode = "decimal"
+            self.fraction_value = None
             self.history_text.appendPlainText(f"{calculation} = {ERROR_TEXT}")
         self.just_calculated = True
+        self.shift = False
+        self._refresh_status()
+        self._refresh_display()
+
+    def _finish_fraction(self) -> bool:
+        try:
+            value = fraction_from_parts(self.fraction_parts)
+            self.expression = self.fraction_prefix + f"({value.numerator}/{value.denominator})"
+            self.fraction_value = value
+            self.fraction_mode = "mixed"
+        except (ValueError, ZeroDivisionError):
+            self.expression = ERROR_TEXT
+            self.fraction_mode = "decimal"
+            self._set_button_feedback("AB/C", "invalid")
+            self.shift = False
+            self._refresh_status()
+            self.fraction_parts = None
+            self._refresh_display()
+            return False
+        self.fraction_parts = None
+        return True
+
+    def _fraction_action(self) -> None:
+        if not self.shift and not self.just_calculated:
+            match = re.search(r"(?<![\d.])\d+$", self.expression)
+            if match:
+                start = match.start()
+                if start == 1 and self.expression.startswith("-"):
+                    start = 0
+                self.fraction_prefix = self.expression[:start]
+                self.fraction_parts = [self.expression[start:], ""]
+                self._refresh_display()
+                return
+        try:
+            value = evaluate_expression(self.expression)
+            if self.fraction_value is None or float(self.fraction_value) != value:
+                self.fraction_value = Fraction(value).limit_denominator(1000000)
+            if self.shift:
+                self.fraction_mode = "improper"
+            else:
+                self.fraction_mode = "mixed" if self.fraction_mode == "decimal" else "decimal"
+            self.answer = value
+            self.just_calculated = True
+            self.display_prefix = ""
+        except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError):
+            self._set_button_feedback("AB/C", "invalid")
         self.shift = False
         self._refresh_status()
         self._refresh_display()
@@ -401,6 +499,7 @@ class CalculatorWindow(QMainWindow):
         self.root_degree_start = None
 
     def _apply_scientific(self, key: str) -> None:
+        self.fraction_mode = "decimal"
         function_map = {
             "WURZEL": "sqrt", "X^2": "square", "1/X": "factorial" if self.shift else "reciprocal",
             "sin": "asin" if self.shift else "sin",
@@ -432,6 +531,7 @@ class CalculatorWindow(QMainWindow):
                 self.memory -= value
             elif key == "MR":
                 self.expression = repr(self.memory)
+                self.fraction_mode = "decimal"
                 self.just_calculated = True
         except (SyntaxError, ValueError, TypeError, ZeroDivisionError):
             self.expression = ERROR_TEXT
@@ -451,6 +551,7 @@ class CalculatorWindow(QMainWindow):
         if self.history:
             self.history_index = max(0, min(len(self.history) - 1, self.history_index + step))
             self.expression = self.history[self.history_index]
+            self.fraction_mode = "decimal"
             self.root_degree_start = None
             self.display_prefix = ""
             self.just_calculated = True
@@ -474,7 +575,17 @@ class CalculatorWindow(QMainWindow):
     def _refresh_display(self) -> None:
         self.notice.hide()
         text = self.expression or "0"
-        if self.root_degree_start is not None:
+        if self.fraction_parts is not None:
+            if len(self.fraction_parts) == 2:
+                text = "/".join(self.fraction_parts)
+            else:
+                separator = " - " if self.fraction_parts[0].startswith("-") else " + "
+                text = f"{self.fraction_parts[0]}{separator}{self.fraction_parts[1]}/{self.fraction_parts[2]}"
+        elif self.just_calculated and self.fraction_mode != "decimal" and self.fraction_value is not None:
+            text = format_fraction(self.fraction_value, self.fraction_mode == "improper")
+            if len(text) > 13:
+                text = format_display(float(self.fraction_value))
+        elif self.root_degree_start is not None:
             text = self.expression[self.root_degree_start:] or "x^(1/y)"
         elif self.display_prefix and text.startswith(self.display_prefix):
             pending_input = text[len(self.display_prefix):]
@@ -483,10 +594,11 @@ class CalculatorWindow(QMainWindow):
                 text = pending_input[len(operator):] or operator
         if self.engineering_notation:
             text = f"{float(self.expression):.3e}"
-        elif self.just_calculated or len(text) > 13:
+        elif (self.just_calculated and self.fraction_mode == "decimal") or len(text) > 13:
             try:
-                text = format_display(float(text))
-            except ValueError:
+                value = evaluate_expression(self.expression) if self.just_calculated else float(text)
+                text = format_display(value)
+            except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError):
                 text = text[-13:]
         self.display.setText(text[-13:])
 

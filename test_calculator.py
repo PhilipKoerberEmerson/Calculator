@@ -503,6 +503,174 @@ def test_duplicate_decimal_is_rejected_without_changing_number(monkeypatch):
         window.close()
 
 
+@pytest.mark.parametrize(
+    ("keys", "expected", "value"),
+    [
+        (["1", "AB/C", "2", "="], "1/2", 0.5),
+        (["2", "AB/C", "1", "AB/C", "3", "="], "2 + 1/3", 7 / 3),
+        (["2", "AB/C", "4", "="], "1/2", 0.5),
+        (["1", "AB/C", "2", "+", "1", "AB/C", "4", "="], "3/4", 0.75),
+        (["2", "AB/C", "1", "AB/C", "3", "=", "SHIFT", "AB/C"], "7/3", 7 / 3),
+        (["1", "AB/C", "2", "=", "AB/C"], "0.5", 0.5),
+        (["0", ".", "7", "5", "AB/C"], "3/4", 0.75),
+        (["-", "2", "AB/C", "1", "AB/C", "3", "="], "-2 - 1/3", -7 / 3),
+    ],
+)
+def test_fraction_entry_and_conversion(monkeypatch, keys, expected, value):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key in keys:
+            window.buttons[key].click()
+            assert len(window.display.text()) <= 13
+        assert window.display.text() == expected
+        assert window.answer == pytest.approx(value)
+        assert not window.shift
+        app.processEvents()
+    finally:
+        window.close()
+
+
+def test_fraction_conversion_preserves_value_and_history_and_supports_right_click(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        window.show()
+        for key in ["2", "AB/C", "1", "AB/C", "3", "="]:
+            window._press(key)
+        expression = window.expression
+        transcript = window.history_text.toPlainText()
+        for _ in range(3):
+            window._press("AB/C")
+            assert window.display.text() == format_display(7 / 3)
+            window._press("AB/C")
+            assert window.display.text() == "2 + 1/3"
+            assert window.expression == expression
+            assert window.history_text.toPlainText() == transcript
+        QTest.mouseClick(window.buttons["AB/C"], Qt.MouseButton.RightButton)
+        assert window.display.text() == "7/3"
+        assert window.expression == expression
+        assert window.history_text.toPlainText() == transcript
+        for key in ["X", "3", "="]:
+            window._press(key)
+        assert window.answer == 7
+        assert window.display.text() == "7"
+        assert len(window.history_text.toPlainText().splitlines()) == 2
+        app.processEvents()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize("denominator", ["0", ""])
+def test_invalid_fraction_denominator_is_rejected(monkeypatch, denominator):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key in ["1", "AB/C"] + list(denominator) + ["="]:
+            window._press(key)
+        assert window.display.text() == "Error"
+        assert window.buttons["AB/C"].property("feedback") == "invalid"
+        assert window.fraction_parts is None
+        for key in ["AC", "2", "+", "3", "="]:
+            window._press(key)
+        assert window.answer == 5
+        app.processEvents()
+    finally:
+        window.close()
+
+
+def test_fraction_entry_can_be_edited_and_cleared(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key, expected in [("2", "2"), ("AB/C", "2/"), ("1", "2/1"), ("AB/C", "2 + 1/"), ("3", "2 + 1/3")]:
+            window._press(key)
+            assert window.display.text() == expected
+        for key in ["DEL", "4", "="]:
+            window._press(key)
+        assert window.display.text() == "2 + 1/4"
+        for key in ["AC", "1", "AB/C", "DEL"]:
+            window._press(key)
+        assert window.display.text() == "1"
+        assert window.fraction_parts is None
+        for key in ["AB/C", "AC", "5", "="]:
+            window._press(key)
+        assert window.answer == 5
+        assert window.fraction_parts is None
+        app.processEvents()
+    finally:
+        window.close()
+
+
+def test_division_by_zero_in_fraction_mode_shows_error(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key in ["1", "AB/C", "2", "=", "/", "0", "="]:
+            window._press(key)
+        assert window.display.text() == "Error"
+        assert window.fraction_value is None
+        app.processEvents()
+    finally:
+        window.close()
+
+
+def test_fraction_results_keep_exact_large_denominators(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from fractions import Fraction
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+    from calculator_core import evaluate_fraction_expression
+
+    assert evaluate_fraction_expression("1/3 + 1/6") == Fraction(1, 2)
+    assert evaluate_fraction_expression("1/10000000") == Fraction(1, 10000000)
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key in ["1", "AB/C"] + list("10000000") + ["="]:
+            window._press(key)
+        assert window.fraction_value == Fraction(1, 10000000)
+        assert window.display.text() == "1/10000000"
+        for key in ["AB/C", "AB/C"]:
+            window._press(key)
+        assert window.display.text() == "1/10000000"
+        for key in ["X"] + list("10000000") + ["="]:
+            window._press(key)
+        assert window.answer == 1
+        assert window.display.text() == "1"
+        app.processEvents()
+    finally:
+        window.close()
+
+
 def test_calculator_buttons_have_no_overlay_text_and_visible_press_feedback(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtCore import Qt
