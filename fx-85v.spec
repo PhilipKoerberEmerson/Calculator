@@ -8,7 +8,7 @@ a = Analysis(
     ['calculator.py'],
     pathex=[],
     binaries=[],
-    datas=[('pictures', 'pictures')],
+    datas=[('pictures', 'pictures'), ('fonts', 'fonts')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
