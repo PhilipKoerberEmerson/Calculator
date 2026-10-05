@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import sys
+import math
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QFont, QFontDatabase, QPixmap
-from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QPushButton, QWidget
+from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QMainWindow, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
-from calculator_core import apply_function, evaluate_expression, format_result
+from calculator_core import apply_function, evaluate_expression, format_display, format_result
 
 
 ERROR_TEXT = "Error"
@@ -27,6 +28,7 @@ class CalculatorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.expression = ""
+        self.display_prefix = ""
         self.answer = 0.0
         self.memory = 0.0
         self.angle_mode = "DEG"
@@ -34,6 +36,8 @@ class CalculatorWindow(QMainWindow):
         self.just_calculated = False
         self.history: list[str] = []
         self.history_index = -1
+        self.history_opened = False
+        self.engineering_notation = False
         self.display_font_family = "Consolas"
         font_id = QFontDatabase.addApplicationFont(resource_path("fonts/DSEG7Classic-Regular.ttf"))
         if font_id >= 0:
@@ -60,6 +64,15 @@ class CalculatorWindow(QMainWindow):
             """
         )
         self._build_ui()
+        self.history_window = QDialog(self)
+        self.history_window.setWindowTitle("Rechenhistorie")
+        self.history_window.resize(560, 500)
+        self.history_text = QPlainTextEdit(self.history_window)
+        self.history_text.setReadOnly(True)
+        self.history_text.setFont(QFont("Consolas", 11))
+        layout = QVBoxLayout(self.history_window)
+        layout.addWidget(self.history_text)
+        self.history_window.installEventFilter(self)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -108,6 +121,28 @@ class CalculatorWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         super().resizeEvent(event)
         self._position_overlay()
+        self._position_history()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._position_history()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is getattr(self, "history_window", None) and event.type() == QEvent.Type.Move:
+            self._position_history()
+        return super().eventFilter(watched, event)
+
+    def _position_history(self) -> None:
+        if not hasattr(self, "history_window") or not self.history_window.isVisible():
+            return
+        frame = self.frameGeometry()
+        position = (frame.right() + 13, frame.top())
+        if (self.history_window.x(), self.history_window.y()) != position:
+            self.history_window.move(*position)
+
+    def _show_history(self) -> None:
+        self.history_window.show()
+        self._position_history()
 
     def _position_overlay(self) -> None:
         if not hasattr(self, "background"):
@@ -141,11 +176,12 @@ class CalculatorWindow(QMainWindow):
         return QRect(round(x * scale_x), round(y * scale_y), round(width * scale_x), round(height * scale_y))
 
     def _press(self, key: str) -> None:
+        self._handle_press(key)
+
+    def _handle_press(self, key: str) -> None:
+        self.engineering_notation = False
         if key == "SHIFT":
             self.shift = not self.shift
-            self.buttons[key].setProperty("role", "active" if self.shift else "action")
-            self.buttons[key].style().unpolish(self.buttons[key])
-            self.buttons[key].style().polish(self.buttons[key])
             self._refresh_status()
             return
         if key in {"Kin", "Kout", "ENG<-", "AB/C", "O'\"", "hyp"}:
@@ -157,7 +193,9 @@ class CalculatorWindow(QMainWindow):
             self.angle_mode = "RAD" if self.angle_mode == "DEG" else "DEG"
         elif key in {"ON", "AC", "C"}:
             self.expression = ""
+            self.display_prefix = ""
             self.shift = False
+            self.just_calculated = False
             if key == "ON":
                 self.memory = 0.0
         elif key == "DEL":
@@ -175,9 +213,15 @@ class CalculatorWindow(QMainWindow):
             self._memory_action(key)
             return
         elif key == "Ans":
-            self.expression += format_result(self.answer)
+            self.expression += repr(self.answer)
         elif key == "EXP":
-            self.expression += "*10**"
+            if self.shift:
+                if self.just_calculated:
+                    self.expression = ""
+                self.expression += str(math.pi)
+                self.just_calculated = False
+            else:
+                self.expression += "*10**"
         elif key == "ENG":
             self._engineering_format()
             return
@@ -188,8 +232,11 @@ class CalculatorWindow(QMainWindow):
         elif key == "--)]":
             self.expression += ")"
         else:
-            if self.just_calculated and key not in "+-*/%)":
+            if self.just_calculated and key not in {"+", "-", "*", "X", "/", "%", ")", "X^Y"}:
                 self.expression = ""
+                self.display_prefix = ""
+            if key in {"+", "-", "*", "X", "/", "%", "X^Y"}:
+                self.display_prefix = self.expression
             self.expression += "*" if key == "X" else ("**" if key == "X^Y" else key)
             self.just_calculated = False
         self.shift = False
@@ -197,31 +244,37 @@ class CalculatorWindow(QMainWindow):
         self._refresh_display()
 
     def _calculate(self) -> None:
+        calculation = self.expression
         try:
             self.answer = evaluate_expression(self.expression)
-            self.expression = format_result(self.answer)
-            self.history.append(self.expression)
-            self.history_index = len(self.history)
+            self.expression = repr(self.answer)
+            self._remember_result(calculation)
         except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError):
             self.expression = ERROR_TEXT
+            self.history_text.appendPlainText(f"{calculation} = {ERROR_TEXT}")
         self.just_calculated = True
         self.shift = False
         self._refresh_status()
         self._refresh_display()
 
     def _apply_scientific(self, key: str) -> None:
+        function_map = {
+            "WURZEL": "sqrt", "X^2": "square", "1/X": "factorial" if self.shift else "reciprocal",
+            "sin": "asin" if self.shift else "sin",
+            "cos": "acos" if self.shift else "cos", "tan": "atan" if self.shift else "tan",
+            "log": "10^x" if self.shift else "log", "ln": "e^x" if self.shift else "ln",
+        }
+        calculation = f"{function_map[key]}({self.expression})"
+        if key in {"sin", "cos", "tan"}:
+            calculation += f" [{self.angle_mode}]"
         try:
             value = evaluate_expression(self.expression)
-            function_map = {
-                "WURZEL": "sqrt", "X^2": "square", "1/X": "reciprocal",
-                "sin": "asin" if self.shift else "sin",
-                "cos": "acos" if self.shift else "cos", "tan": "atan" if self.shift else "tan",
-                "log": "10^x" if self.shift else "log", "ln": "e^x" if self.shift else "ln",
-            }
             self.answer = apply_function(function_map[key], value, self.angle_mode)
-            self.expression = format_result(self.answer)
-        except (ValueError, TypeError, OverflowError, ZeroDivisionError):
+            self.expression = repr(self.answer)
+            self._remember_result(calculation)
+        except (SyntaxError, ValueError, TypeError, OverflowError, ZeroDivisionError):
             self.expression = ERROR_TEXT
+            self.history_text.appendPlainText(f"{calculation} = {ERROR_TEXT}")
         self.just_calculated = True
         self.shift = False
         self._refresh_status()
@@ -235,7 +288,8 @@ class CalculatorWindow(QMainWindow):
             elif key == "Min":
                 self.memory -= value
             elif key == "MR":
-                self.expression = format_result(self.memory)
+                self.expression = repr(self.memory)
+                self.just_calculated = True
         except (SyntaxError, ValueError, TypeError, ZeroDivisionError):
             self.expression = ERROR_TEXT
         self._refresh_status()
@@ -244,7 +298,8 @@ class CalculatorWindow(QMainWindow):
     def _engineering_format(self) -> None:
         try:
             value = evaluate_expression(self.expression)
-            self.expression = f"{value:.3e}"
+            self.expression = repr(value)
+            self.engineering_notation = True
         except (SyntaxError, ValueError, TypeError, ZeroDivisionError):
             self.expression = ERROR_TEXT
         self._refresh_display()
@@ -253,7 +308,18 @@ class CalculatorWindow(QMainWindow):
         if self.history:
             self.history_index = max(0, min(len(self.history) - 1, self.history_index + step))
             self.expression = self.history[self.history_index]
+            self.just_calculated = True
+            self._show_history()
             self._refresh_display()
+
+    def _remember_result(self, calculation: str) -> None:
+        self.display_prefix = ""
+        self.history.append(self.expression)
+        self.history_index = len(self.history)
+        self.history_text.appendPlainText(f"{calculation} = {self.expression}")
+        if not self.history_opened:
+            self._show_history()
+            self.history_opened = True
 
     def _show_message(self, message: str) -> None:
         self.notice.setText(message)
@@ -262,9 +328,26 @@ class CalculatorWindow(QMainWindow):
 
     def _refresh_display(self) -> None:
         self.notice.hide()
-        self.display.setText(self.expression or "0")
+        text = self.expression or "0"
+        if self.display_prefix and text.startswith(self.display_prefix):
+            pending_input = text[len(self.display_prefix):]
+            if pending_input and pending_input[0] in "+-*/%":
+                operator = "**" if pending_input.startswith("**") else pending_input[0]
+                text = pending_input[len(operator):] or operator
+        if self.engineering_notation:
+            text = f"{float(self.expression):.3e}"
+        elif self.just_calculated or len(text) > 13:
+            try:
+                text = format_display(float(text))
+            except ValueError:
+                text = text[-13:]
+        self.display.setText(text[-13:])
 
     def _refresh_status(self) -> None:
+        button = self.buttons["SHIFT"]
+        button.setProperty("role", "active" if self.shift else "action")
+        button.style().unpolish(button)
+        button.style().polish(button)
         self.status.setText(f"{self.angle_mode}  |  SHIFT {'ON' if self.shift else 'OFF'}  |  M: {format_result(self.memory)}")
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API name

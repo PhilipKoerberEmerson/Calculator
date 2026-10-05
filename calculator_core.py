@@ -55,6 +55,14 @@ def format_result(value: float) -> str:
     return f"{value:.12g}"
 
 
+def format_display(value: float) -> str:
+    for precision in range(12, 0, -1):
+        text = f"{value:.{precision}g}"
+        if len(text) <= 13:
+            return text
+    raise ValueError("value does not fit the display")
+
+
 def apply_function(name: str, value: float, angle_mode: str = "DEG") -> float:
     """Apply one scientific calculator function to a numeric value."""
     value = float(value)
