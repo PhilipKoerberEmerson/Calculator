@@ -115,7 +115,7 @@ class CalculatorWindow(QMainWindow):
         width, height = self.centralWidget().size().width(), self.centralWidget().size().height()
         self.background.setGeometry(0, 0, width, height)
         scale_x, scale_y = width / 816, height / 1494
-        self.display.setGeometry(self._scaled_rect(100, 100, 600, 128, scale_x, scale_y))
+        self.display.setGeometry(self._scaled_rect(120, 100, 650, 128, scale_x, scale_y))
         self.status.setGeometry(self._scaled_rect(215, 65, 390, 32, scale_x, scale_y))
         self.notice.setGeometry(self._scaled_rect(130, 320, 556, 54, scale_x, scale_y))
 
