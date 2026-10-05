@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import sys
 import math
+import random
+import re
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtCore import QEvent, QTimer, Qt
 from PyQt6.QtGui import QFont, QFontDatabase, QPixmap
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
 
@@ -29,6 +31,7 @@ class CalculatorWindow(QMainWindow):
         super().__init__()
         self.expression = ""
         self.display_prefix = ""
+        self.root_degree_start = None
         self.answer = 0.0
         self.memory = 0.0
         self.angle_mode = "DEG"
@@ -51,12 +54,17 @@ class CalculatorWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow { background: #202522; }
-            QPushButton { background: transparent; color: transparent; border: 1px solid transparent;
+            QPushButton { background: transparent; color: transparent; border: 2px solid transparent;
                 border-radius: 8px; }
-            QPushButton:hover { background: rgba(126, 157, 131, 70); border: 2px solid rgba(126, 157, 131, 210);
-                color: #17241f; font-size: 17px; font-weight: 700; }
-            QPushButton:pressed { background: rgba(126, 157, 131, 120); color: #17241f; font-size: 17px; font-weight: 700; }
+            QPushButton:hover { background: rgba(126, 157, 131, 70); border: 2px solid rgba(126, 157, 131, 210); }
             QPushButton[role="active"] { background: rgba(126, 157, 131, 125); border: 2px solid #d5e0d0; }
+            QPushButton:pressed, QPushButton[role="active"]:pressed {
+                background: rgba(150, 198, 159, 160); border: 2px solid #c5f0ce; }
+            QPushButton[feedback="shift"], QPushButton[feedback="shift"]:pressed,
+            QPushButton[role="active"] {
+                background: rgba(245, 211, 85, 135); border: 2px solid #ffe071; }
+            QPushButton[feedback="invalid"], QPushButton[feedback="invalid"]:pressed {
+                background: rgba(240, 85, 85, 150); border: 2px solid #ff7070; }
             QLabel#display { background: rgba(184, 201, 174, 220); color: #17241f; border: 2px solid #63766b;
                 border-radius: 5px; padding: 8px 12px; font-size: 26px; }
             QLabel#status { background: rgba(232, 224, 208, 180); color: #31443d; padding: 2px 7px;
@@ -107,14 +115,20 @@ class CalculatorWindow(QMainWindow):
             [("0", "number"), (".", "number"), ("EXP", "function"), ("=", "action"), ("M+", "function")],
         ]
         self.buttons: dict[str, QPushButton] = {}
+        self.feedback_timers: dict[str, QTimer] = {}
         for row_keys in upper_rows + lower_rows:
             for column, (key, role) in enumerate(row_keys):
-                button = QPushButton(key, root)
+                button = QPushButton(root)
                 button.setProperty("role", role)
-                button.setToolTip(f"Symbol: {key}")
+                button.setAccessibleName(key)
                 button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 button.clicked.connect(lambda _checked=False, value=key: self._press(value))
+                button.installEventFilter(self)
                 self.buttons[key] = button
+                timer = QTimer(button)
+                timer.setSingleShot(True)
+                timer.timeout.connect(lambda value=key: self._set_button_feedback(value, ""))
+                self.feedback_timers[key] = timer
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -152,6 +166,33 @@ class CalculatorWindow(QMainWindow):
     def eventFilter(self, watched, event) -> bool:
         if watched is getattr(self, "calculator_surface", None) and event.type() == QEvent.Type.Resize:
             self._position_overlay()
+        if isinstance(watched, QPushButton):
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() in {Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton}:
+                key = watched.accessibleName()
+                shifted = self.shift or event.button() == Qt.MouseButton.RightButton or key == "SHIFT"
+                self._set_button_feedback(key, "shift" if shifted else "")
+                self.feedback_timers[key].stop()
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
+                watched.setDown(True)
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton:
+                pressed = watched.isDown()
+                watched.setDown(False)
+                self.feedback_timers[watched.accessibleName()].start(220)
+                if pressed and watched.rect().contains(event.position().toPoint()):
+                    key = watched.accessibleName()
+                    if key == "SHIFT":
+                        self._press(key)
+                    else:
+                        self.shift = True
+                        try:
+                            self._press(key)
+                        finally:
+                            self.shift = False
+                            self._refresh_status()
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                self.feedback_timers[watched.accessibleName()].start(220)
         return super().eventFilter(watched, event)
 
     def _toggle_history(self) -> None:
@@ -212,10 +253,48 @@ class CalculatorWindow(QMainWindow):
         return QRect(round(x * scale_x), round(y * scale_y), round(width * scale_x), round(height * scale_y))
 
     def _press(self, key: str) -> None:
+        invalid_pi = key == "EXP" and self.shift and not self._can_insert_pi()
+        number = re.search(r"(?:\d[\d.]*|\.\d*)(?:[eE][+-]?\d*)?$", self.expression) if key == "." and not self.shift else None
+        invalid_decimal = key == "." and not self.shift and not self.just_calculated and number is not None and any(
+            character in number.group() for character in ".eE"
+        )
+        if invalid_pi or invalid_decimal:
+            self._set_button_feedback(key, "invalid")
+            self.shift = False
+            self._refresh_status()
+            return
+        if self.shift or key == "SHIFT":
+            self._set_button_feedback(key, "shift")
         self._handle_press(key)
+
+    def _set_button_feedback(self, key: str, feedback: str) -> None:
+        if key not in self.buttons:
+            return
+        button = self.buttons[key]
+        button.setProperty("feedback", feedback)
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+        timer = self.feedback_timers[key]
+        timer.stop()
+        if feedback:
+            timer.start(350 if feedback == "invalid" else 220)
+
+    def _can_insert_pi(self) -> bool:
+        if self.just_calculated:
+            return True
+        if self.root_degree_start is not None:
+            return self.expression[self.root_degree_start:] in {"", "+", "-"}
+        return not self.expression or self.expression[-1] in "+-*/%("
 
     def _handle_press(self, key: str) -> None:
         self.engineering_notation = False
+        if self.root_degree_start is not None and key in {
+            "=", "X^Y", "X", "*", "/", "%", "+", "-", "sin", "cos", "tan",
+            "WURZEL", "log", "ln", "1/X", "X^2", "Min", "MR", "M+", "ENG",
+        }:
+            if key not in {"+", "-"} or len(self.expression) != self.root_degree_start:
+                self._finish_root()
         if key == "SHIFT":
             self.shift = not self.shift
             self._refresh_status()
@@ -230,12 +309,17 @@ class CalculatorWindow(QMainWindow):
         elif key in {"ON", "AC", "C"}:
             self.expression = ""
             self.display_prefix = ""
+            self.root_degree_start = None
             self.shift = False
             self.just_calculated = False
             if key == "ON":
                 self.memory = 0.0
         elif key == "DEL":
             self.expression = self.expression[:-1]
+            if self.root_degree_start is not None and len(self.expression) < self.root_degree_start:
+                self.expression = self.display_prefix
+                self.display_prefix = ""
+                self.root_degree_start = None
         elif key == "=":
             self._calculate()
             return
@@ -250,9 +334,28 @@ class CalculatorWindow(QMainWindow):
             return
         elif key == "Ans":
             self.expression += repr(self.answer)
+        elif key == "X^Y" and self.shift:
+            self.display_prefix = self.expression
+            self.expression += "**(1/"
+            self.root_degree_start = len(self.expression)
+            self.just_calculated = False
+        elif key == "." and self.shift:
+            number = f"0.{random.randrange(1000):03d}"
+            pending_input = self.expression[len(self.display_prefix):] if self.display_prefix else ""
+            operator = "**" if pending_input.startswith("**") else pending_input[:1]
+            if self.root_degree_start is not None:
+                self.expression = self.expression[:self.root_degree_start] + number
+            elif self.display_prefix and self.expression.startswith(self.display_prefix) and operator in {"+", "-", "*", "**", "/", "%"}:
+                self.expression = self.display_prefix + operator + number
+            elif not self.just_calculated and self.expression and self.expression[-1] in "+-*/%(":
+                self.expression += number
+            else:
+                self.expression = number
+                self.display_prefix = ""
+            self.just_calculated = False
         elif key == "EXP":
             if self.shift:
-                if self.just_calculated:
+                if self.just_calculated and self.root_degree_start is None:
                     self.expression = ""
                 self.expression += str(math.pi)
                 self.just_calculated = False
@@ -292,6 +395,10 @@ class CalculatorWindow(QMainWindow):
         self.shift = False
         self._refresh_status()
         self._refresh_display()
+
+    def _finish_root(self) -> None:
+        self.expression += ")"
+        self.root_degree_start = None
 
     def _apply_scientific(self, key: str) -> None:
         function_map = {
@@ -344,6 +451,8 @@ class CalculatorWindow(QMainWindow):
         if self.history:
             self.history_index = max(0, min(len(self.history) - 1, self.history_index + step))
             self.expression = self.history[self.history_index]
+            self.root_degree_start = None
+            self.display_prefix = ""
             self.just_calculated = True
             self._show_history()
             self._refresh_display()
@@ -365,7 +474,9 @@ class CalculatorWindow(QMainWindow):
     def _refresh_display(self) -> None:
         self.notice.hide()
         text = self.expression or "0"
-        if self.display_prefix and text.startswith(self.display_prefix):
+        if self.root_degree_start is not None:
+            text = self.expression[self.root_degree_start:] or "x^(1/y)"
+        elif self.display_prefix and text.startswith(self.display_prefix):
             pending_input = text[len(self.display_prefix):]
             if pending_input and pending_input[0] in "+-*/%":
                 operator = "**" if pending_input.startswith("**") else pending_input[0]

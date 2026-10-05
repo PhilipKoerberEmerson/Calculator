@@ -290,6 +290,291 @@ def test_shift_key_bindings(monkeypatch, keys, expected):
         window.close()
 
 
+@pytest.mark.parametrize("right_click", [False, True])
+@pytest.mark.parametrize(
+    ("base", "degree", "following_keys", "expected"),
+    [
+        ("16", "2", [], 4),
+        ("27", "3", [], 3),
+        ("16", "2", ["X", "3"], 12),
+        ("16", "-2", [], 0.25),
+        ("16", "0", [], None),
+        ("16", "", [], None),
+    ],
+)
+def test_shift_power_computes_reciprocal_exponent(monkeypatch, right_click, base, degree, following_keys, expected):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        window.show()
+        app.processEvents()
+        for key in base:
+            window.buttons[key].click()
+        if right_click:
+            QTest.mouseClick(window.buttons["X^Y"], Qt.MouseButton.RightButton)
+        else:
+            window.buttons["SHIFT"].click()
+            window.buttons["X^Y"].click()
+        assert window.display.text() == "x^(1/y)"
+        assert not window.shift
+        for key in degree:
+            window.buttons[key].click()
+        if degree:
+            assert window.display.text() == degree
+        for key in following_keys + ["="]:
+            window.buttons[key].click()
+        if expected is None:
+            assert window.display.text() == "Error"
+        else:
+            assert window.answer == pytest.approx(expected)
+        assert len(window.history_text.toPlainText().splitlines()) == 1
+        assert window.root_degree_start is None
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize(
+    ("initial_keys", "key", "expected"),
+    [
+        (["5"], "1/X", "120"),
+        ([], "EXP", format_display(math.pi)),
+        (["1"], "sin", "90"),
+        ([], ".", "0.007"),
+        (["1"], "cos", "0"),
+        (["1"], "log", "10"),
+    ],
+)
+def test_right_mouse_button_uses_shift_binding(monkeypatch, initial_keys, key, expected):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setattr("calculator.random.randrange", lambda stop: 7)
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        window.show()
+        app.processEvents()
+        for initial_key in initial_keys:
+            window.buttons[initial_key].click()
+        button = window.buttons[key]
+        QTest.mousePress(button, Qt.MouseButton.RightButton, pos=button.rect().center())
+        assert button.isDown()
+        QTest.mouseRelease(button, Qt.MouseButton.RightButton, pos=button.rect().center())
+        assert not button.isDown()
+        assert window.display.text() == expected
+        assert not window.shift
+        assert window.buttons["SHIFT"].property("role") == "action"
+    finally:
+        window.close()
+
+
+def test_root_entry_can_be_deleted_cleared_and_use_shift_constants(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setattr("calculator.random.randrange", lambda stop: 500)
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key in ["1", "6", "SHIFT", "X^Y", "2", "DEL"]:
+            window._press(key)
+        assert window.display.text() == "x^(1/y)"
+        window._press("DEL")
+        assert window.expression == "16"
+        assert window.root_degree_start is None
+        for key in ["SHIFT", "X^Y", "SHIFT", ".", "="]:
+            window._press(key)
+        assert window.answer == 256
+        window._press("AC")
+        for key in ["1", "6", "SHIFT", "X^Y", "SHIFT", "EXP", "="]:
+            window._press(key)
+        assert window.answer == pytest.approx(16 ** (1 / math.pi))
+        for key in ["SHIFT", "X^Y", "AC", "2", "X^Y", "3", "="]:
+            window._press(key)
+        assert window.answer == 8
+        assert window.root_degree_start is None
+        app.processEvents()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize("right_click", [False, True])
+def test_shift_clicks_are_yellow_and_duplicate_pi_is_rejected_red(monkeypatch, right_click):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        window.show()
+        app.processEvents()
+        button = window.buttons["EXP"]
+        for attempt in range(2):
+            if not right_click:
+                window.buttons["SHIFT"].click()
+            mouse_button = Qt.MouseButton.RightButton if right_click else Qt.MouseButton.LeftButton
+            QTest.mousePress(button, mouse_button, pos=button.rect().center())
+            assert button.property("feedback") == "shift"
+            yellow_image = button.grab().toImage()
+            QTest.mouseRelease(button, mouse_button, pos=button.rect().center())
+            assert window.expression == str(math.pi)
+            assert window.history_text.toPlainText() == ""
+            assert not window.shift
+            if attempt:
+                assert button.property("feedback") == "invalid"
+                assert button.grab().toImage() != yellow_image
+                assert window.feedback_timers["EXP"].isActive()
+                window.feedback_timers["EXP"].timeout.emit()
+                assert button.property("feedback") == ""
+        window.buttons["+"].click()
+        if not right_click:
+            window.buttons["SHIFT"].click()
+        QTest.mouseClick(button, Qt.MouseButton.RightButton if right_click else Qt.MouseButton.LeftButton)
+        window.buttons["="].click()
+        assert window.answer == 2 * math.pi
+        window.buttons["SHIFT"].click()
+        window.buttons["EXP"].click()
+        assert window.expression == str(math.pi)
+        assert button.property("feedback") == "shift"
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize("initial_keys", [["5"], ["1", ".", "5"], ["1", "6", "SHIFT", "X^Y", "2"]])
+def test_pi_does_not_append_to_existing_number(monkeypatch, initial_keys):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key in initial_keys:
+            window._press(key)
+        expression = window.expression
+        display = window.display.text()
+        window._press("SHIFT")
+        window._press("EXP")
+        assert window.expression == expression
+        assert window.display.text() == display
+        assert window.buttons["EXP"].property("feedback") == "invalid"
+        assert not window.shift
+        app.processEvents()
+    finally:
+        window.close()
+
+
+def test_duplicate_decimal_is_rejected_without_changing_number(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key in ["1", ".", "2", "."]:
+            window._press(key)
+        assert window.expression == "1.2"
+        assert window.buttons["."].property("feedback") == "invalid"
+        for key in ["+", "3", ".", "4", "="]:
+            window._press(key)
+        assert window.answer == pytest.approx(4.6)
+        app.processEvents()
+    finally:
+        window.close()
+
+
+def test_calculator_buttons_have_no_overlay_text_and_visible_press_feedback(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        window.show()
+        app.processEvents()
+        for key, button in window.buttons.items():
+            assert button.text() == ""
+            assert button.toolTip() == ""
+            assert button.accessibleName() == key
+        button = window.buttons["5"]
+        geometry = button.geometry()
+        QTest.mouseMove(button, button.rect().center())
+        app.processEvents()
+        hover_image = button.grab().toImage()
+        QTest.mousePress(button, Qt.MouseButton.LeftButton, pos=button.rect().center())
+        app.processEvents()
+        assert button.isDown()
+        assert button.grab().toImage() != hover_image
+        assert button.geometry() == geometry
+        QTest.mouseRelease(button, Qt.MouseButton.LeftButton, pos=button.rect().center())
+        assert window.expression == "5"
+        assert not button.isDown()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize("draw", [0, 1, 7, 100, 300, 999])
+@pytest.mark.parametrize("initial_keys", [[], ["5"], ["2", "="], ["2", "X"], ["2", "X", "5"]])
+def test_shift_decimal_generates_three_digit_random_number(monkeypatch, draw, initial_keys):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+
+    from calculator import CalculatorWindow
+
+    def draw_number(stop):
+        assert stop == 1000
+        return draw
+
+    monkeypatch.setattr("calculator.random.randrange", draw_number)
+    app = QApplication.instance() or QApplication([])
+    window = CalculatorWindow()
+    try:
+        for key in initial_keys:
+            window.buttons[key].click()
+        transcript = window.history_text.toPlainText()
+        expected_text = f"0.{draw:03d}"
+        for _ in range(2):
+            window.buttons["SHIFT"].click()
+            window.buttons["."].click()
+            assert window.display.text() == expected_text
+            assert not window.shift
+            assert window.buttons["SHIFT"].property("role") == "action"
+            assert window.history_text.toPlainText() == transcript
+        multiplier = 2 if "X" in initial_keys else 1
+        expected_expression = f"2*{expected_text}" if multiplier == 2 else expected_text
+        assert window.expression == expected_expression
+        window.buttons["="].click()
+        assert window.answer == multiplier * (draw / 1000)
+        assert expected_expression in window.history_text.toPlainText()
+        app.processEvents()
+    finally:
+        window.close()
+
+
 @pytest.mark.parametrize("size", [(816, 1494), (410, 750), (1000, 1800)])
 @pytest.mark.parametrize("expanded", [False, True])
 def test_resize_only_changes_history_width(monkeypatch, size, expanded):
