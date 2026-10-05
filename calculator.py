@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QFont, QFontDatabase, QPixmap
-from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QMainWindow, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QPushButton, QToolButton, QVBoxLayout, QWidget
 
 from calculator_core import apply_function, evaluate_expression, format_display, format_result
 
@@ -37,6 +37,7 @@ class CalculatorWindow(QMainWindow):
         self.history: list[str] = []
         self.history_index = -1
         self.history_opened = False
+        self.history_width = 360
         self.engineering_notation = False
         self.display_font_family = "Consolas"
         font_id = QFontDatabase.addApplicationFont(resource_path("fonts/DSEG7Classic-Regular.ttf"))
@@ -45,7 +46,8 @@ class CalculatorWindow(QMainWindow):
             if font_families:
                 self.display_font_family = font_families[0]
         self.setWindowTitle("Philip's CASIO fx-85v")
-        self.setMinimumSize(410, 750)
+        self.setFixedHeight(750)
+        self.setFixedWidth(434)
         self.setStyleSheet(
             """
             QMainWindow { background: #202522; }
@@ -61,21 +63,19 @@ class CalculatorWindow(QMainWindow):
                 border-radius: 3px; font-size: 11px; font-weight: 700; }
             QLabel#notice { background: rgba(49, 68, 61, 230); color: #fffaf0; padding: 8px 12px;
                 border-radius: 4px; font-size: 12px; }
+            QWidget#historyPanel { background: #f4f6f3; }
+            QLabel#historyTitle { color: #25372c; font-size: 16px; font-weight: 700; }
+            QPlainTextEdit { background: #ffffff; color: #25372c; border: 1px solid #b9c6bc; }
+            QToolButton { background: #d5e0d0; color: #17241f; border: 0; }
+            QToolButton:hover { background: #a6bda8; }
             """
         )
         self._build_ui()
-        self.history_window = QDialog(self)
-        self.history_window.setWindowTitle("Rechenhistorie")
-        self.history_window.resize(560, 500)
-        self.history_text = QPlainTextEdit(self.history_window)
-        self.history_text.setReadOnly(True)
-        self.history_text.setFont(QFont("Consolas", 11))
-        layout = QVBoxLayout(self.history_window)
-        layout.addWidget(self.history_text)
-        self.history_window.installEventFilter(self)
 
     def _build_ui(self) -> None:
         root = QWidget()
+        root.setFixedSize(410, 750)
+        self.calculator_surface = root
         self.background = QLabel(root)
         self.background.setPixmap(QPixmap(resource_path("pictures/CASIO_fx-85v.jpg")))
         self.background.setScaledContents(True)
@@ -115,39 +115,75 @@ class CalculatorWindow(QMainWindow):
                 button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 button.clicked.connect(lambda _checked=False, value=key: self._press(value))
                 self.buttons[key] = button
-        self.setCentralWidget(root)
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(root)
+        self.history_toggle = QToolButton(container)
+        self.history_toggle.setFixedSize(24, 48)
+        self.history_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.history_toggle.setToolTip("Rechenhistorie ausklappen")
+        self.history_toggle.setAccessibleName("Rechenhistorie ausklappen")
+        self.history_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.history_toggle.clicked.connect(self._toggle_history)
+        layout.addWidget(self.history_toggle, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.history_panel = QWidget(container)
+        self.history_panel.setObjectName("historyPanel")
+        self.history_panel.setMinimumWidth(240)
+        history_layout = QVBoxLayout(self.history_panel)
+        title = QLabel("Rechenhistorie", self.history_panel)
+        title.setObjectName("historyTitle")
+        history_layout.addWidget(title)
+        self.history_text = QPlainTextEdit(self.history_panel)
+        self.history_text.setReadOnly(True)
+        self.history_text.setFont(QFont("Consolas", 11))
+        history_layout.addWidget(self.history_text)
+        layout.addWidget(self.history_panel, 1)
+        self.history_panel.hide()
+        root.installEventFilter(self)
+        self.setCentralWidget(container)
         self._position_overlay()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         super().resizeEvent(event)
         self._position_overlay()
-        self._position_history()
-
-    def moveEvent(self, event) -> None:
-        super().moveEvent(event)
-        self._position_history()
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is getattr(self, "history_window", None) and event.type() == QEvent.Type.Move:
-            self._position_history()
+        if watched is getattr(self, "calculator_surface", None) and event.type() == QEvent.Type.Resize:
+            self._position_overlay()
         return super().eventFilter(watched, event)
 
-    def _position_history(self) -> None:
-        if not hasattr(self, "history_window") or not self.history_window.isVisible():
+    def _toggle_history(self) -> None:
+        self.history_opened = True
+        self._set_history_visible(self.history_panel.isHidden())
+
+    def _set_history_visible(self, visible: bool) -> None:
+        if visible == (not self.history_panel.isHidden()):
             return
-        frame = self.frameGeometry()
-        position = (frame.right() + 13, frame.top())
-        if (self.history_window.x(), self.history_window.y()) != position:
-            self.history_window.move(*position)
+        if not visible:
+            self.history_width = self.history_panel.width()
+        self.history_panel.setVisible(visible)
+        if visible:
+            self.setMaximumWidth(16777215)
+            self.setMinimumWidth(434 + self.history_panel.minimumWidth())
+        else:
+            self.setFixedWidth(434)
+        self.history_toggle.setArrowType(Qt.ArrowType.LeftArrow if visible else Qt.ArrowType.RightArrow)
+        label = "Rechenhistorie einklappen" if visible else "Rechenhistorie ausklappen"
+        self.history_toggle.setToolTip(label)
+        self.history_toggle.setAccessibleName(label)
+        self.resize(434 + (self.history_width if visible else 0), 750)
+        self.centralWidget().layout().activate()
+        self._position_overlay()
 
     def _show_history(self) -> None:
-        self.history_window.show()
-        self._position_history()
+        self._set_history_visible(True)
 
     def _position_overlay(self) -> None:
         if not hasattr(self, "background"):
             return
-        width, height = self.centralWidget().size().width(), self.centralWidget().size().height()
+        width, height = self.calculator_surface.width(), self.calculator_surface.height()
         self.background.setGeometry(0, 0, width, height)
         scale_x, scale_y = width / 816, height / 1494
         self.display.setGeometry(self._scaled_rect(99, 100, 650, 128, scale_x, scale_y))

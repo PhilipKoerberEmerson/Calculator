@@ -33,12 +33,12 @@ def test_display_precision_and_copyable_history(monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = CalculatorWindow()
     try:
-        assert not window.history_window.isVisible()
+        assert window.history_panel.isHidden()
         for key in ["1", "/", "3"]:
             window.buttons[key].click()
-        assert not window.history_window.isVisible()
+        assert window.history_panel.isHidden()
         window.buttons["="].click()
-        assert window.history_window.isVisible()
+        assert not window.history_panel.isHidden()
         assert window.answer == 1 / 3
         assert window.expression == repr(1 / 3)
         for key in ["X", "3", "="]:
@@ -55,9 +55,9 @@ def test_display_precision_and_copyable_history(monkeypatch):
         window.history_text.selectAll()
         window.history_text.copy()
         assert app.clipboard().text() == transcript
-        window.history_window.close()
+        window.history_toggle.click()
         window.buttons[">"].click()
-        assert window.history_window.isVisible()
+        assert not window.history_panel.isHidden()
         assert window.history_text.toPlainText() == transcript
     finally:
         window.close()
@@ -90,7 +90,7 @@ def test_display_limit_for_every_input_and_result(monkeypatch, keys, expected_an
             assert len(window.display.text()) <= 13
         assert window.answer == expected_answer
         if keys == ["5", "SHIFT", "1/X"]:
-            assert window.history_window.isVisible()
+            assert not window.history_panel.isHidden()
         app.processEvents()
     finally:
         window.close()
@@ -171,7 +171,7 @@ def test_display_current_operand_and_calculation_only_history(monkeypatch):
         window.close()
 
 
-def test_history_stays_to_the_right_of_calculator(monkeypatch):
+def test_history_panel_can_collapse_and_expand_without_losing_state(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtWidgets import QApplication
 
@@ -181,26 +181,51 @@ def test_history_stays_to_the_right_of_calculator(monkeypatch):
     window = CalculatorWindow()
     try:
         window.show()
-        window.move(40, 60)
+        app.processEvents()
+        surface_size = window.calculator_surface.size()
+        display_geometry = window.display.geometry()
+        collapsed_width = window.width()
+        assert window.history_panel.isHidden()
         for key in ["1", "="]:
             window.buttons[key].click()
-        for action in [
-            lambda: None,
-            lambda: window.move(100, 120),
-            lambda: window.resize(550, 900),
-            lambda: window.history_window.move(0, 0),
-        ]:
-            action()
+        for _ in range(3):
             app.processEvents()
-            assert window.history_window.frameGeometry().left() == window.frameGeometry().right() + 13
-            assert window.history_window.frameGeometry().top() == window.frameGeometry().top()
-        window.history_window.close()
+            assert window.history_panel.isVisible()
+            assert not window.history_panel.isWindow()
+            assert window.history_panel.x() == window.calculator_surface.width() + 24
+            assert window.calculator_surface.size() == surface_size
+            assert window.display.geometry() == display_geometry
+            assert window.width() == collapsed_width + 360
+            transcript = window.history_text.toPlainText()
+            window.history_toggle.click()
+            app.processEvents()
+            assert window.history_panel.isHidden()
+            assert window.history_toggle.isVisible()
+            assert window.width() == collapsed_width
+            assert window.calculator_surface.size() == surface_size
+            for key in ["+", "2", "="]:
+                window.buttons[key].click()
+            assert window.history_panel.isHidden()
+            assert window.history_text.toPlainText().startswith(transcript)
+            answer = window.answer
+            expression = window.expression
+            window.history_toggle.click()
+            assert window.answer == answer
+            assert window.expression == expression
         window.move(70, 80)
+        window.resize(1000, 900)
+        app.processEvents()
+        assert window.history_panel.x() == window.calculator_surface.width() + 24
+        assert window.history_panel.height() == window.calculator_surface.height()
+        assert window.calculator_surface.size() == surface_size
+        assert window.height() == 750
+        assert window.history_panel.width() == 566
+        window.history_toggle.click()
         window.buttons[">"].click()
         app.processEvents()
-        assert window.history_window.isVisible()
-        assert window.history_window.frameGeometry().left() == window.frameGeometry().right() + 13
-        assert window.history_window.frameGeometry().top() == window.frameGeometry().top()
+        assert not window.history_panel.isHidden()
+        assert window.width() == 1000
+        assert window.history_panel.width() == 566
     finally:
         window.close()
 
@@ -266,7 +291,8 @@ def test_shift_key_bindings(monkeypatch, keys, expected):
 
 
 @pytest.mark.parametrize("size", [(816, 1494), (410, 750), (1000, 1800)])
-def test_display_geometry_scales_on_resize(monkeypatch, size):
+@pytest.mark.parametrize("expanded", [False, True])
+def test_resize_only_changes_history_width(monkeypatch, size, expanded):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtCore import QRect
     from PyQt6.QtWidgets import QApplication
@@ -277,15 +303,31 @@ def test_display_geometry_scales_on_resize(monkeypatch, size):
     window = CalculatorWindow()
     try:
         window.show()
+        if expanded:
+            window.history_toggle.click()
+        app.processEvents()
+        button_geometry = {key: button.geometry() for key, button in window.buttons.items()}
         window.resize(*size)
         app.processEvents()
-        scale_x = window.centralWidget().width() / 816
-        scale_y = window.centralWidget().height() / 1494
+        assert window.height() == 750
+        assert window.calculator_surface.width() == 410
+        assert window.calculator_surface.height() == 750
+        assert window.background.geometry() == QRect(0, 0, 410, 750)
+        if expanded:
+            assert window.width() == max(size[0], 674)
+            assert window.history_panel.width() == window.width() - 434
+            assert window.history_panel.height() == 750
+        else:
+            assert window.width() == 434
+            assert window.history_panel.isHidden()
+        scale_x = 410 / 816
+        scale_y = 750 / 1494
         assert window.display.geometry() == QRect(
-            round(120 * scale_x), round(100 * scale_y),
+            round(99 * scale_x), round(100 * scale_y),
             round(650 * scale_x), round(128 * scale_y),
         )
         assert window.status.geometry() == window._scaled_rect(215, 65, 390, 32, scale_x, scale_y)
         assert window.notice.geometry() == window._scaled_rect(130, 320, 556, 54, scale_x, scale_y)
+        assert {key: button.geometry() for key, button in window.buttons.items()} == button_geometry
     finally:
         window.close()
